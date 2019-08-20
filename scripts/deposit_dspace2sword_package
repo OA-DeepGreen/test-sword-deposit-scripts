@@ -1,0 +1,226 @@
+#! /usr/bin/env bash
+
+function usage() {
+  echo
+  echo "usage: `basename $0` [options] {zip-file}"
+  echo
+  echo "   zip-file     : simple (i.e. flat hierarchy) .zip file with exactly"
+  echo "                  one .xml file and (possibly) multiple binary files"
+  echo
+  echo " possible options:"
+  echo
+  echo "   -u user       : sword user name allowed to do deposits [curr. '${user}']"
+  if [ -z "${pw}" ]; then
+    echo "   -p passwd     : sword password for sword user [curr. not set!]"
+  else
+    echo "   -p passwd     : sword password for sword user [curr. '***']"
+  fi
+  echo "   -h host       : sword host http address [curr. '${dspace_host}']"
+  echo "   -s sword-api  : sword api root (aka dspace instance) [curr. '${sword_api}']"
+  echo "   -c collection : sword collection where to deposit [curr. '${collection_id}']"
+  echo "   -m            : mets switch; if given produce METSDSpaceSIP xml [curr. '${mets}']"
+  echo "   -d            : debug switch; if given no delivery at all(!) [curr. '${debug}']"
+  echo
+  echo " Currently using '${dspace_host}/${sword_api}/collection/${collection_id}'"
+  echo " as SWORD delivery end point." 
+  echo
+  exit -1
+}
+
+mets="false"
+debug="false"
+dspace_host="https://deepgreentest.ub.tu-berlin.de" #
+sword_api="deepspace-swordv2"
+collection_id="123456789/2"
+user="sword@marsa.dspace.ganze.net"
+#user="broman@tu-berlin.de"
+pw=""
+
+date=`which date`
+mimetype=`which mimetype`
+xmlstarlet=`which xmlstarlet`
+xml_pp=`which xml_pp`
+head=`which head`
+cat=`which cat`
+cut=`which cut`
+curl=`which curl`
+zip=`which zip`
+unzip=`which unzip`
+zipgrep=`which zipgrep`
+md5sum=`which md5sum`
+mktemp=`which mktemp`
+wc=`which wc`
+tr=`which tr`
+getopt=`which getopt`
+
+${getopt} --test >/dev/null
+if [ $? -ne 4 ]; then
+  echo "error: 'getopt --test' failed in this environment, stop."
+  exit 1
+fi
+
+parsed=`${getopt} --options mdh:c:p:u:s: --longoptions mets,debug,passwd:,user:,collection:,sword:,host: --name "$0" -- "$@"`
+if [ $? -ne 0 ]; then usage ; fi
+
+eval set -- "${parsed}"
+while true; do
+  case "$1" in
+         -m|--mets) mets="true" ; shift ;;
+        -d|--debug) debug="true" ; shift ;;
+         -u|--user) user="$2" ; shift 2 ;;
+       -p|--passwd) pw="$2" ; shift 2 ;;
+        -s|--sword) sword_api="$2"; shift 2 ;;
+   -c|--collection) collection_id="$2"; shift 2 ;;
+         -h|--host) dspace_host="$2"; shift 2 ;;
+                --) shift ; break ;;
+                 *) echo "Internal error!" ; exit 1 ;;
+  esac
+done
+
+if [ $# -ge 1 ]; then
+  zip_file="$1"
+else
+  usage
+fi
+
+if [ -z "${pw}" ]; then
+  read -p "[sword password] for $user: " -s pw
+  echo
+fi
+
+## x_packaging="http://purl.org/net/sword/package/SimpleZip"
+x_packaging="http://purl.org/net/sword/package/METSMODS"
+if [ "${mets}" = "true" ]; then
+  x_packaging="http://purl.org/net/sword/package/METSDSpaceSIP"
+fi
+
+abs_xsl="./Util/nlm_jats2METSMODS_xml.xsl"
+if [ "${mets}" = "true" ]; then
+  abs_xsl="./Util/nlm_jats2METSDSpaceSIP_xml.xsl"
+fi
+abs_xsl_add="./Util/add_files2METS_xml.xsl"
+abs_xsl_struct="./Util/add_struct2METS_xml.xsl"
+pkg_fmt="https://datahub.deepgreen.org/FilesAndJATS"
+has_xml=`${zipgrep} "DOCTYPE article" ${zip_file} | ${wc} -l`
+
+if [ ${has_xml} -eq 1 ]; then
+  is_jrnl=`${zipgrep} "//NLM//DTD Journal " ${zip_file} | ${wc} -l`
+  is_jats=`${zipgrep} "//NLM//DTD JATS " ${zip_file} | ${wc} -l`
+  is_rsc=`${zipgrep} "//RSC//DTD RSC " ${zip_file} | ${wc} -l`
+  if [ ${is_jrnl} -eq 1 ]; then
+    abs_xsl="./Util/nlm_jats2METSMODS_xml.xsl"
+    if [ "${mets}" = "true" ]; then
+      abs_xsl="./Util/nlm_jats2METSDSpaceSIP_xml.xsl"
+    fi
+    pkg_fmt="https://datahub.deepgreen.org/FilesAndJATS"
+  elif [ ${is_jats} -eq 1 ]; then
+    abs_xsl="./Util/nlm_jats2METSMODS_xml.xsl"
+    if [ "${mets}" = "true" ]; then
+      abs_xsl="./Util/nlm_jats2METSDSpaceSIP_xml.xsl"
+    fi
+    pkg_fmt="https://datahub.deepgreen.org/FilesAndJATS"
+  elif [ ${is_rsc} -eq 1 ]; then
+    abs_xsl="./Util/rsc_rsc2METSMODS_xml.xsl"
+    if [ "${mets}" = "true" ]; then
+      abs_xsl="./Util/rsc_rsc2METSDSpaceSIP_xml.xsl"
+    fi
+    pkg_fmt="https://datahub.deepgreen.org/FilesAndRSC"
+  else
+    echo "error: no valid .xml (Journal or JATS or RSC) in zip archive found: stop."
+    exit -2
+  fi
+else
+  echo "error: no valid (or too many?!) .xml (Journal xor JATS xor RSC) in zip archive found: stop."
+  exit -3
+fi
+
+echo "`basename $0`: packaging format in zip archive found:"
+echo "`basename $0`: ${pkg_fmt}"
+
+tmp_dir=`${mktemp} -q -d`
+trap "rm -rf ${tmp_dir}" 0 2 3 15
+
+${unzip} -q ${zip_file} -d "${tmp_dir}/xfer"
+
+
+meta_xml="`ls -1 ${tmp_dir}/xfer/*.xml | ${head} -1`"
+now=`${date} +%FT%T.%N`
+${cat} ${meta_xml} | ${xmlstarlet} -q tr ${abs_xsl} -s "currdatetime=${now}" | ${xml_pp} >"${tmp_dir}/mets.xml"
+mycnt=1
+for f in "${tmp_dir}"/xfer/*; do
+  ##echo "${f}"
+  [ "${f%.xml}" != "${f}" ] && continue
+  MD5=`${md5sum} --binary "${f}" | ${cut} -d" " -f1`
+  FL=`basename ${f}`
+  mime=`${mimetype} --brief ${f}`
+  ${cat} "${tmp_dir}/mets.xml" | ${xmlstarlet} -q tr ${abs_xsl_add} -s "cnt=${mycnt}" -s "md5=${MD5}" -s "file=${FL}" -s "mime=${mime}" | ${xml_pp} >"${tmp_dir}/tmp.xml"
+  mv "${tmp_dir}/tmp.xml" "${tmp_dir}/mets.xml"
+  mycnt=`expr ${mycnt} + 1`
+done
+#
+${cat} "${tmp_dir}/mets.xml" | ${xmlstarlet} -q tr ${abs_xsl_struct} | ${xml_pp}  >"${tmp_dir}/tmp.xml"
+mv "${tmp_dir}/tmp.xml" "${tmp_dir}/mets.xml"
+#
+rm -f ${meta_xml}
+## mv "${tmp_dir}/mets.xml" ${meta_xml}
+mv "${tmp_dir}/mets.xml" "${tmp_dir}/xfer/mets.xml"
+${zip} -j -r "${tmp_dir}/package.zip" "${tmp_dir}/xfer" 
+
+
+MD5=`${md5sum} --binary "${tmp_dir}/package.zip" | ${cut} -d" " -f1`
+echo "`basename $0`: md5sum: ${MD5}"
+
+# atom_dc="`${cat} ${tmp_dir}/atom_dc.xml`"
+# MD5=`${md5sum} --binary "${zip_file}" | ${cut} -d" " -f1`
+# FL="`basename ${zip_file}`"
+# #${cat} | ${tr} '\n' ',' | ${tr} ',' '\r\n' >${tmp_dir}/multipart.txt <<EOFx
+# ${cat} >${tmp_dir}/multipart.txt <<EOFx
+# Content-Type: multipart/related; boundary="=======425724625=="; type="application/atom+xml"
+# MIME-Version: 1.0
+# 
+# Media Post
+# --=======425724625==
+# Content-Type: application/atom+xml
+# Content-Disposition: name="atom"
+# MIME-Version: 1.0
+# 
+# ${atom_dc}
+# --=======425724625==
+# Packaging: ${x_packaging}
+# Content-Type: application/zip
+# Content-MD5: ${MD5}
+# Content-Disposition: filename=${FL}; name=payload
+# MIME-Version: 1.0
+# 
+# EOFx
+# ${cat} ${zip_file} >>${tmp_dir}/multipart.txt
+# ${cat} >>${tmp_dir}/multipart.txt <<EOFy
+# 
+# --=======425724625==--
+# EOFy
+
+if [ "${debug}" = "true" ]; then 
+  # cp "${tmp_dir}/multipart.txt" ./dspace.txt 
+  # cp "${tmp_dir}/xfer/atom_dc.xml" ./dspace.xml 
+  cp "${tmp_dir}/xfer/mets.xml" ./dspace.xml 
+  cp "${tmp_dir}/package.zip" ./dspace.zip
+  exit 1 
+fi
+
+## header="Content-Type: application/zip"
+
+# echo
+# echo ${curl} -s --verbose --insecure -u "${user}:***" "${dspace_host}/${sword_api}/collection/${collection_id}" --data-binary "@${tmp_dir}/mutlipart.txt"
+# ${curl} -s --verbose --insecure -u "${user}:${pw}" "${dspace_host}/${sword_api}/collection/${collection_id}" --data-binary "@${tmp_dir}/multipart.txt"
+# ### ${curl} --verbose --insecure --header "Content-Type: multipart/related;type=application/x-www-form-urlencoded" --form "atom=@${tmp_dir}/atom_dc.xml;type=application/atom+xml" --form "payload=@${zip_file};filename=${FL};md5=${MD5};type=application/zip" -u "${user}:${pw}" "${dspace_host}/${sword_api}/collection/${collection_id}"
+# 
+# exit 0
+
+echo
+echo ${curl} -s --verbose --insecure --header "Packaging: ${x_packaging}" --header "Content-Type: application/zip" --header "Content-Disposition: filename=package.zip" --header "Content-MD5: ${MD5}" --data-binary "@${tmp_dir}/package.zip" -u "${user}:***" "${dspace_host}/${sword_api}/collection/${collection_id}"
+${curl} -s --verbose --insecure --header "Packaging: ${x_packaging}" --header "Content-Type: application/zip" --header "Content-Disposition: filename=package.zip" --header "Content-MD5: ${MD5}" --data-binary "@${tmp_dir}/package.zip" -u "${user}:${pw}" "${dspace_host}/${sword_api}/collection/${collection_id}" 
+## ${curl} -i -s -H "Content-Type: applicatin/atom+xml" -u "$user:$pw" -X POST "${dspace_host}/${sword_api}/collection/${collection_id}" -F "content=@${tmp_dir}/atom_dc.xml;type=application/atom+xml"
+
+#echo
+#echo "Temporary files still available at '${tmp_dir}'."
+#rm -rf ${tmp_dir}
