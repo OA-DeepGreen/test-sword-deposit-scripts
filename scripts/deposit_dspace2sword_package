@@ -89,10 +89,11 @@ if [ -z "${pw}" ]; then
 fi
 
 ## x_packaging="http://purl.org/net/sword/package/SimpleZip"
-x_packaging="http://purl.org/net/sword/package/METSMODS"
-if [ "${mets}" = "true" ]; then
-  x_packaging="http://purl.org/net/sword/package/METSDSpaceSIP"
-fi
+#x_packaging="http://purl.org/net/sword/package/METSMODS"
+#if [ "${mets}" = "true" ]; then
+#  x_packaging="http://purl.org/net/sword/package/METSDSpaceSIP"
+#fi
+x_packaging="http://purl.org/net/sword/package/METSDSpaceSIP"
 
 abs_xsl="./Util/nlm_jats2METSMODS_xml.xsl"
 if [ "${mets}" = "true" ]; then
