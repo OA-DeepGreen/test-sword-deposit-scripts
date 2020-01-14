@@ -75,13 +75,13 @@
           </titleMain>
       </titlesMain>
       <titles>
-          <xsl:if test="//journal-meta/journal-title-group/journal-title">
+          <xsl:for-each select="//journal-meta//journal-title">
             <title> 
               <xsl:attribute name="language"><xsl:value-of select="$langOut"/></xsl:attribute>
               <xsl:attribute name="type"><xsl:text>parent</xsl:text></xsl:attribute> 
-              <xsl:value-of select="//journal-meta/journal-title-group/journal-title"/>
+              <xsl:value-of select="normalize-space(text())"/>
             </title>
-          </xsl:if>
+          </xsl:for-each>
       </titles>
       <abstracts>
           <xsl:if test="//article-meta/abstract">
@@ -93,7 +93,7 @@
       </abstracts>
       <persons>
           <xsl:for-each select="//article-meta/contrib-group/contrib">
-            <xsl:if test="name/surname">
+	    <xsl:if test="string-length(normalize-space(name/surname/text()))>0">
             <person>
                 <xsl:attribute name="role">
                   <xsl:choose>
